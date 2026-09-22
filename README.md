@@ -63,17 +63,37 @@ pip install opencv-python numpy
 
 ## 运行
 
+### 首次运行
+
+本仓库**不包含 `images/`**（已在 `.gitignore` 中排除）。首次使用需先生成素材：
+
 ```powershell
-python orb.py          # 三组全跑
-python orb.py 旋转     # 只跑旋转组
-python orb.py 尺度
-python orb.py 无关
+python make_test_images.py
 ```
 
-每组会依次弹出两个窗口（按任意键切换）：
+脚本会自动创建 `images/` 目录并写入 4 张图。因为用的是**固定随机种子 + 固定 JPEG 质量**，
+任何时候重新生成都得到**字节完全相同**的文件 —— 所以仓库里不需要存图片。
 
-1. `bfm` —— 按汉明距离排序的前 30 个匹配
-2. `bfm+ransac` —— 通过几何一致性校验的内点
+> 也可以只克隆仓库后直接运行，那样会报"读图失败"—— 因为缺少素材。
+
+### 日常运行
+
+```powershell
+python orb.py          # 三组全跑
+python orb.py rotate   # 只跑旋转组
+python orb.py scale    # 只跑尺度组
+python orb.py unrel    # 只跑无关组
+```
+
+参数用**英文 id**（`rotate` / `scale` / `unrel`），**不是中文名** ——
+中文会被拿去当窗口标题，而 OpenCV 的窗口标题在中文 Windows 上会显示成乱码
+（`旋转` → `鏃嬭浆`）。机理见 [base.md](base.md) §12。
+
+每组会依次弹出窗口（按任意键切换）：
+
+1. `{pid}:bfm` —— 按汉明距离排序的前 `TOP_N` 个匹配（当前 60）
+2. `{pid}:bfm+ransac` —— 通过几何一致性校验的内点
+   ⚠️ **仅当内点率 > 0.15 时才弹**；低于阈值会打印"判定为无有效匹配"并跳过
 
 > 必须在 `ORB/` 目录下运行，或写成 `python ORB\orb.py`。
 > （图片路径由 `Path(__file__).parent` 解析，与工作目录无关；但 `orb.py` 本身的定位依赖 cwd。）
@@ -84,8 +104,8 @@ python orb.py 无关
 
 ```
 orb.py
-├── load_image(name)              imread + 转灰度，失败即退出
-├── detect(gray, orb)             ORB 检测 → (kp, des)
+├── load_image(name)              imread + 转灰度，失败返回 None
+├── detect(gray, orb)             ORB 检测 → (kp, des)，失败返回 None
 ├── match_bfm(des1, des2)         BFMatcher(NORM_HAMMING, crossCheck)
 ├── sort_matches(matches, n)      按 distance 升序取前 n
 ├── run_pair(name, f1, f2, orb)   串起一组配对的完整流程
@@ -101,7 +121,7 @@ orb.py
 
     ── 第一级过滤：局部纹理相似度 ──
     → bf.match(des1, des2) → list[DMatch]（按汉明距离）
-    → sorted(distance)[:30]  → 可视化用
+    → sorted(distance)[:TOP_N]  → 可视化用
 
     ── 第二级过滤：全局几何一致性 ──
     → 取出 kp[queryIdx].pt / kp[trainIdx].pt → (N,2) float32
@@ -116,7 +136,8 @@ orb.py
 
 ## 实测基准
 
-固定条件：`nfeatures=500`，`TOP_N=30`，`cvtColor` 读灰度，RANSAC 阈值 3 像素。
+固定条件：`nfeatures=500`，`cvtColor` 读灰度，RANSAC 阈值 3 像素。
+（`TOP_N` 只影响画多少条线，不参与统计，改它不会动下表任何数字。）
 
 ### 关键点数量
 
@@ -242,44 +263,89 @@ FAST 角点只在有纹理处点火，而 ORB 按 `.response` 取前 500 个，
 
 ## 已知问题
 
-### A. 代码问题（已定位，未修复）
+### A. 代码问题
 
-| # | 位置 | 问题 | 后果 |
-|---|---|---|---|
-| **1** | `orb.py:60` vs `63-64` | **空匹配的"保护"写在 `findHomography` 之后** | **保护永远不生效** —— 匹配为空时第 60 行先崩，根本走不到第 64 行。位置必须前移 |
-| **2** | `orb.py:65` | 匹配为空时 `np.median([])` | 返回 **`nan`**，并抛 `RuntimeWarning: Mean of empty slice`（实测） |
-| **3** | `orb.py:60` | `H is None` 未判断 | 点数 ≥4 但几何退化时（如所有点重合），`findHomography` 返回 **`(None, None)`**（实测），后续 `mask.ravel()` 会 `AttributeError` |
-| **4** | `orb.py:64` | 变量名 `temp` | 语义不明，三个月后看不懂它是"最佳匹配的汉明距离" |
-| **5** | `orb.py:66` | 打印了内点**数量**，没打印**比例** | 无关组的 7 个和旋转组的 223 个看起来只差数量级，看不出 5.4% vs 79.9% 的本质区别 |
-| **6** | `orb.py:68-69` | 内点率低于地板也照画 | 无关组画出 7 条假线，**视觉上误导**，违反了本项目实测出的 5%~6% 噪声地板 |
-| **7** | `orb.py:84-88` | 组名敲错时静默走完全部循环、什么都不输出 | "什么都不发生"是最难 debug 的失败模式 |
-| **8** | `orb.py:46-47` | 同一张图跨组重复检测 | `a_original` 在"旋转"和"无关"两组里被 `imread` + `detectAndCompute` 各算一次，浪费（也是潜在的 bug 源：两处结果不一致时会很迷惑） |
+#### ✅ 已修复（2026-09-22）
 
-**关于 #1 的详细说明**（最严重的一条）：
+| # | 原问题 | 修法 |
+|---|---|---|
+| **1** | 空匹配的"保护"写在 `findHomography` **之后** → 永远不生效 | 判断前移到 `findHomography` **之前**：`if len(matches) < 4: print(...); return` |
+| **2** | 匹配为空时 `np.median([])` 返回 `nan` + `RuntimeWarning` | 被 #1 的提前返回覆盖，已不可能到达 |
+| **3** | `H is None` 未判断（点数 ≥4 但几何退化时返回 `(None, None)`） | 加 `if H is None or mask is None:`，**并且打印了原因**"无满足的几何关系" |
+| **4** | 变量名 `temp` 语义不明 | **整个变量删掉了** —— 因为 #1 保证了 `len(matches) >= 4`，`matches_topn[0]` 天然安全 |
+| **6** | 内点率低于噪声地板也照画 | 加 `if inlier_rate > 0.15` 阈值；低于则打印"判定为无有效匹配"并跳过绘图 |
+
+**#1 的教训值得单独记一笔**：
 
 ```python
-H, mask = cv2.findHomography(src, dst, cv2.RANSAC, 3)      # ← 第 60 行：匹配为空时在这里就崩了
-inliers = [m for m, k in zip(matches, mask.ravel()) if k == 1]
-
-#保护，防止出现一个匹配都没有的情况，用999代表最小距离也无限大      ← 第 63-64 行：太晚了
+# 修复前
+H, mask = cv2.findHomography(src, dst, cv2.RANSAC, 3)   # ← 匹配为空时在这里就崩了
+...
+#保护，防止出现一个匹配都没有的情况                        ← 写在这里太晚了
 temp = matches_topn[0].distance if len(matches_topn) > 0 else 999
 ```
 
-实测 `findHomography` 在点数 **< 4** 时**直接抛异常**（不是返回 None）：
+实测 `findHomography` 在点数 **< 4** 时**直接抛异常**（`Assertion failed: npoints >= 4`），
+所以 `matches` 一旦为空，程序在 `findHomography` 那行就终止了，
+**保护代码永远得不到执行的机会** —— 条件写对了，但它站错了位置。
 
-```
-error: (-215:Assertion failed) npoints >= 4 ...
+> **防御性编程的通用检查**：加任何守卫时，先问一句
+> **"这行代码在崩溃点之前还是之后？"**
+
+#### ⚠️ 未修复
+
+| # | 位置 | 问题 | 后果 |
+|---|---|---|---|
+| **5** | `orb.py:70-77` | **内点率只在失败分支才打印** | 成功时看到"内点数量 223"却看不到"79.9%" —— 而**内点率才是判别指标**。失败分支反而打得更详细，逻辑反了 |
+| **7** | `orb.py:93-96` | 组名敲错时静默走完全部循环、什么都不输出 | `python orb.py rotat`（少个 e）→ 无输出、无报错。"什么都不发生"是最难 debug 的失败模式 |
+| **8** | `orb.py:45-46` | 同一张图跨组重复检测 | `a_original` 在 `rotate` 和 `unrel` 两组里被 `imread` + `detectAndCompute` 各算一次（也是潜在 bug 源：两处结果不一致时会很迷惑） |
+| **9** | `orb.py:45-50` | **返回 `None` 后没有被检查**（半程重构） | `load_image`/`detect` 已从 `sys.exit(1)` 改成 `return None`，但 `run_pair` 里还是直接 `img1["gray"]` / `kp1, des1 = ...`。图读失败或描述子为空时，炸在 `TypeError: 'NoneType' object is not subscriptable` / `cannot unpack non-sequence NoneType`，**且报错位置离真正的原因很远** |
+
+**关于 #9 的详细说明**（和 #5 是**同一个毛病**：改了产出方，没改消费方）：
+
+```python
+def load_image(name):
+    rgb = cv2.imread(path)
+    if rgb is None:
+        print("读图失败")
+        return None          # ← 改成"返回 None"是对的
+                             #   （辅助函数里不该 sys.exit，它不该决定整个程序死活）
+
+def run_pair(...):
+    img1 = load_image(img1_name)          # ← 返回值被扔掉了
+    kp1, des1 = detect(img1["gray"], orb) # ← 假设 img1 一定不是 None → TypeError
 ```
 
-所以 `matches` 一旦为空，程序在第 60 行就终止了，第 64 行的 `if len(...) > 0` 永远得不到执行的机会。
-**保护条件本身是对的，但它站错了位置。**
+这个方向本身是**改对了**的：`load_image` 只负责"读图"，不该替 `main` 决定要不要退出整个程序。
+但**重构只做了一半** —— 契约从"要么返回图、要么终止进程"变成了"要么返回图、要么返回 None"，
+而调用方还按老契约写。修法是在 `run_pair` 里检查返回值，拿到 `None` 就 `return`。
+
+**关于 #5 的详细说明**：
+
+```python
+print("内点数量-通过ransac匹配", len(inliers))    # ← 只打印了【数量】
+inlier_rate = len(inliers) / len(matches)         # ← 算了【比例】
+draw(..., f"{pid}:bfm")
+if inlier_rate > 0.15:
+    draw(..., f"{pid}:bfm+ransac")                # ← 成功路径：比例【没打印】
+else:
+    print(name, "内点率仅 %.1f%%..." % (inlier_rate*100))   # ← 失败路径：打印了
+```
+
+`inlier_rate` 算出来了，但**只喂给了 `if` 判断和失败分支的打印**。
+跑 `python orb.py rotate` 你会看到 `内点数量-通过ransac匹配 223`，但看不到 `79.9%`。
+
+**而 223 这个绝对数字只有和 130、157 放在一起才有意义** —— 比例才是可比的量。
+修法很简单：把打印 `内点数量` 那一行改成同时打印数量和比例（或紧邻新增一行）。
+注意 `inlier_rate` **已经算出来了**，只是没在这条路径上打印 —— 不用重新计算。
 
 ### B. 方法层面的局限
 
 | 局限 | 说明 |
 |---|---|
-| **没有"拒绝"机制** | RANSAC 在纯噪声上必然产出 5%~6% 内点，`findHomography` 也从不报错。当前程序**没有能力说出"这组没有有效匹配"** |
-| **固定 `TOP_N=30` 做可视化对比** | 旋转组有 223 个内点却只画 30 条，无关组只有 7 个内点也画 7 条 —— 两边的"信息密度"不对等，看图会失真 |
+| ~~没有"拒绝"机制~~ | ✅ 已解决：加了 `inlier_rate > 0.15` 阈值（约噪声地板 × 3） |
+| **阈值 0.15 是从 8 次实测推出的，样本仍偏小** | 地板实测区间 4.5%~6.4%，0.15 留了 2.3 倍的余量。但**只用了合成素材**，真实照片的地板未必相同 |
+| **两侧画线数不对等** | 第一张图固定画 `TOP_N` 条（当前 60），第二张画全部内点。旋转组有 223 个内点却只画 60 条，无关组只有 7 个内点也画 7 条 —— 两边的"信息密度"不对等，看图会失真 |
 | **只假设单一几何关系** | 单应矩阵假设两图间是**一个平面**或纯旋转（相机光心不动）。有多个深度层次的真实场景里，这个假设会失效 |
 | **阈值 3 像素未经标定** | 这个值是凭经验取的，没测过它对内点率的影响曲线 |
 | **素材是合成的** | 渐变 + 噪点的统计特性和真实照片差异很大。真实照片有传感器噪声、镜头畸变、运动模糊、曝光变化 —— 本项目所有结论**只在合成素材上验证过** |
@@ -298,11 +364,14 @@ error: (-215:Assertion failed) npoints >= 4 ...
 
 ### D. 工程化缺口
 
-- [ ] `requirements.txt`（`pip freeze > requirements.txt`）
-- [ ] Git 版本管理（目前整个 `ORB/` 没有任何版本控制）
-- [ ] `base.md` 第 8 节需按新实验结论修订（那里还留着已被推翻的解释）
-- [ ] `base.md` 第 4 行声明的环境版本需与实际核对
-- [ ] 没有自动化测试 —— 每次重构后靠"三组数字不变"人工比对（见下）
+- [x] ~~`requirements.txt`~~ ✅ 已写（`numpy==2.5.3` / `opencv-python==5.0.0.93`）
+- [x] ~~Git 版本管理~~ ✅ 已建立（`.gitignore` 排除 `.venv/ __pycache__/ *.jpg`）
+- [x] ~~`make_test_images.py` 在 fresh clone 上跑不起来~~ ✅ 已修（自动 `mkdir` + 检查 `imwrite` 返回值 + `Path(__file__).parent` 解 cwd 依赖），独立验证过
+- [x] ~~`base.md` 第 8 节留着已被推翻的解释~~ ✅ 已修订（并加了警告框说明哪条被推翻、怎么推翻的）
+- [x] ~~`base.md` 第 4 行环境版本~~ ✅ 已与实际对齐
+- [x] ~~`base.md` 第 11 节 RANSAC 占位~~ ✅ 已填上真实内容，并新增 §12 讲编码问题
+- [ ] **没有自动化测试** —— 每次改动后靠"三组数字不变"人工比对（见下）
+- [ ] **未提交的改动** —— `orb.py`、`make_test_images.py`、`requirements.txt` 还在工作区
 
 ---
 
@@ -310,17 +379,17 @@ error: (-215:Assertion failed) npoints >= 4 ...
 
 ### 近期：把当前程序做扎实
 
-| # | 改进 | 做法 |
-|---|---|---|
-| 1 | **修复保护顺序**（问题 A-1） | 把空匹配判断提到 `findHomography` **之前**，用 `if len(matches) < 4: return` 早退 |
-| 2 | **打印内点率**（问题 A-5） | `inlier_rate = len(inliers) / len(matches)`，同时打印数量和百分比 |
-| 3 | **加拒绝阈值**（问题 A-6） | 内点率低于 `0.15`（≈ 噪声地板 6% 的 2.5 倍）时打印"无有效匹配"并**跳过绘图** |
-| 4 | **处理 `H is None`**（问题 A-3） | `if H is None: return` |
-| 5 | **组名校验**（问题 A-7） | 校验 `which` 是否在 `[p[0] for p in PAIRS]` 里，不在就列出可选值并 `sys.exit(1)` |
-| 6 | **改名**（问题 A-4） | `temp` → `best_distance` |
-| 7 | **避免重复检测**（问题 A-8） | 用 `dict` 缓存已算过的图：`cache[filename] = (kp, des)` |
-| 8 | **可视化对齐** | 两侧画同样的条数（如都取 min(30, len(inliers))），对比才公平 |
-| 9 | `requirements.txt` + Git | 前者锁定版本，后者记录演进过程 |
+| # | 改进 | 做法 | 状态 |
+|---|---|---|---|
+| 1 | **修复保护顺序**（问题 A-1） | 把空匹配判断提到 `findHomography` **之前**早退 | ✅ 已完成 |
+| 3 | **加拒绝阈值**（问题 A-6） | 内点率低于 `0.15`（≈ 噪声地板 × 3）时跳过绘图 | ✅ 已完成 |
+| 4 | **处理 `H is None`**（问题 A-3） | `if H is None or mask is None: return` | ✅ 已完成 |
+| 6 | ~~改名 `temp`~~ | 整个变量删掉了（问题 A-1 的修复让它变得多余） | ✅ 已完成 |
+| 9 | `requirements.txt` + Git | 锁定版本 + 记录演进 | ✅ 已完成 |
+| **2** | **打印内点率**（问题 A-5） | **只修了一半** —— 比例算了但成功路径没打印，只喂给了 `if` 和失败分支 | ⚠️ **待补** |
+| **5** | **组名校验**（问题 A-7） | 校验 `which` 是否在 `[p[1] for p in PAIRS]` 里，不在就列出可选值并退出 | ⚠️ 待做 |
+| **7** | **避免重复检测**（问题 A-8） | 用 `dict` 缓存已算过的图：`cache[filename] = (kp, des)` | ⚠️ 待做 |
+| **8** | **可视化对齐** | 两侧画同样的条数（如都取 `min(30, len(inliers))`），对比才公平 | ⚠️ 待做 |
 
 ### 中期：换个角度重新审视算法
 

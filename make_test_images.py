@@ -6,11 +6,20 @@
 """
 import cv2
 import numpy as np
+import sys
+from pathlib import Path
 
 W, H = 1200, 900
 OUT = "images"
 QUALITY = 95
+#用来存放生成的图片素材
+BASE = Path(__file__).parent
+OUT = BASE / "images"
 
+def save(path, img):
+    if not cv2.imwrite(path, img, [cv2.IMWRITE_JPEG_QUALITY, QUALITY]):
+        print("写图失败",path)
+        sys.exit(1)
 
 def make_base(seed):
     """画一张纹理丰富的合成图：渐变底 + 噪点 + 多边形 + 圆 + 文字 + 棋盘格。"""
@@ -76,16 +85,17 @@ def rotate_expand(img, angle):
 
 
 def main():
+    OUT.mkdir(parents=True, exist_ok=True)
+
     a = make_base(20260918)
     b = make_base(777)
 
-    cv2.imwrite(f"{OUT}/a_original.jpg", a, [cv2.IMWRITE_JPEG_QUALITY, QUALITY])
-    cv2.imwrite(f"{OUT}/a_rotated.jpg", rotate_expand(a, 40.0),
-                [cv2.IMWRITE_JPEG_QUALITY, QUALITY])
+    save(f"{OUT}/a_original.jpg", a)
+    save(f"{OUT}/a_rotated.jpg", rotate_expand(a, 40.0))
+    save(f"{OUT}/b_original.jpg", b)
 
-    cv2.imwrite(f"{OUT}/b_original.jpg", b, [cv2.IMWRITE_JPEG_QUALITY, QUALITY])
     small = cv2.resize(b, None, fx=0.25, fy=0.25, interpolation=cv2.INTER_AREA)
-    cv2.imwrite(f"{OUT}/b_scaled.jpg", small, [cv2.IMWRITE_JPEG_QUALITY, QUALITY])
+    save(f"{OUT}/b_scaled.jpg", small)
 
     for name in ["a_original", "a_rotated", "b_original", "b_scaled"]:
         im = cv2.imread(f"{OUT}/{name}.jpg")
